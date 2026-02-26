@@ -170,7 +170,7 @@ public:
 		m_log{std::move(log)}, m_scanNear{near}, m_scanFar{far}, m_scoreThresh{thresh}, m_personRadius{person_radius}
 	{
 		Ort::SessionOptions options{};
-		options.AppendExecutionProvider_CUDA(OrtCUDAProviderOptions{});
+		// options.AppendExecutionProvider_CUDA(OrtCUDAProviderOptions{});
 		m_session = Ort::Session(env, modelPath.c_str(), options);
 		m_allocator.emplace(m_session, Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 		m_binding.emplace(m_session);
@@ -199,15 +199,15 @@ public:
 		}
 		m_binding->BindInput("scan", scan);
 
-		RCLCPP_DEBUG(m_log, "[LFE-Peaks] Inference start");
+		RCLCPP_INFO(m_log, "[LFE-Peaks] Inference start");
 		m_binding->SynchronizeInputs();
 		m_session.Run(Ort::RunOptions{nullptr}, *m_binding);
 		m_binding->SynchronizeOutputs();
-		RCLCPP_DEBUG(m_log, "[LFE-Peaks] Inference end");
+		RCLCPP_INFO(m_log, "[LFE-Peaks] Inference end");
 
 		auto seg_out = std::move(m_binding->GetOutputValues()[0]);
 		const float* seg_raw = seg_out.GetTensorData<float>();
-		auto seg_shape = std::move(seg_out.GetTensorTypeAndShapeInfo().GetShape());
+		auto seg_shape = seg_out.GetTensorTypeAndShapeInfo().GetShape();
 
 		if (seg_shape.size() != sizeof(scan_shape)/sizeof(scan_shape[0]) || memcmp(seg_shape.data(), scan_shape, sizeof(scan_shape)) != 0) {
 			RCLCPP_ERROR(m_log, "[LFE-Peaks] Unexpected segmentation shape");
@@ -227,7 +227,7 @@ public:
 
 		auto [py_peaks, py_counts] = m_pyScope["parse_seg"](py_scan, py_scan_xy, py_seg, m_personRadius).cast<std::pair<py::array_t<float>, py::list>>();
 		if (!py_peaks || !py_peaks.ndim()) {
-			RCLCPP_DEBUG(m_log, "[LFE-Peaks] No peaks detected");
+			RCLCPP_INFO(m_log, "[LFE-Peaks] No peaks detected");
 			return {};
 		}
 
@@ -314,7 +314,7 @@ public:
 	{
 		Dl_info dlinfo;
 		if (dladdr(PyExc_RecursionError, &dlinfo)) {
-			RCLCPP_DEBUG(get_logger(), "Pinning %s", dlinfo.dli_fname);
+			RCLCPP_INFO(get_logger(), "Pinning %s", dlinfo.dli_fname);
 			m_hPythonDylib = dlopen(dlinfo.dli_fname, RTLD_LAZY | RTLD_GLOBAL);
 		}
 
@@ -329,7 +329,7 @@ public:
 		auto thresh = declare_parameter<float>("score_threshold", 0.484925f);
 		auto radius = declare_parameter<float>("person_radius",   0.4f);
 
-		RCLCPP_DEBUG(get_logger(), "near=%f far=%f", near, far);
+		RCLCPP_INFO(get_logger(), "near=%f far=%f", near, far);
 
 		m_model.emplace(get_logger(), m_ortEnv, model_file, near, far, thresh, radius);
 

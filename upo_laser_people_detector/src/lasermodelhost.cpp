@@ -69,7 +69,7 @@ public:
 		m_log{log}, m_scanNear{near}, m_scanFar{far}, m_scoreThresh{thresh}
 	{
 		Ort::SessionOptions options{};
-		options.AppendExecutionProvider_CUDA(OrtCUDAProviderOptions{});
+		// options.AppendExecutionProvider_CUDA(OrtCUDAProviderOptions{});
 		m_session = Ort::Session(env, modelPath.c_str(), options);
 		m_allocator.emplace(m_session, Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault));
 		m_binding.emplace(m_session);
@@ -79,6 +79,28 @@ public:
 
 	std::vector<Person> infer(sensor_msgs::msg::LaserScan const& msg)
 	{
+		// Debug: Check laser scan data
+		unsigned valid_ranges = 0;
+		unsigned inf_ranges = 0;
+		unsigned nan_ranges = 0;
+		float min_range = std::numeric_limits<float>::max();
+		float max_range = 0.0f;
+		
+		for (size_t i = 0; i < msg.ranges.size(); i++) {
+			if (std::isfinite(msg.ranges[i])) {
+				valid_ranges++;
+				if (msg.ranges[i] < min_range) min_range = msg.ranges[i];
+				if (msg.ranges[i] > max_range) max_range = msg.ranges[i];
+			} else if (std::isinf(msg.ranges[i])) {
+				inf_ranges++;
+			} else {
+				nan_ranges++;
+			}
+		}
+		
+		RCLCPP_DEBUG(m_log, "[LFE-PPN] Scan: %zu points, valid=%u, inf=%u, nan=%u, range=[%.2f, %.2f]",
+			msg.ranges.size(), valid_ranges, inf_ranges, nan_ranges, min_range, max_range);
+		
 		int64_t scan_shape[] = {
 			1, (int64_t)msg.ranges.size(), 1
 		};
@@ -86,9 +108,16 @@ public:
 		Ort::Value scan = Ort::Value::CreateTensor<float>(*m_allocator, &scan_shape[0], 3);
 		float* scan_data = scan.GetTensorMutableData<float>();
 		for (size_t i = 0; i < msg.ranges.size(); i ++) {
-			float x = msg.ranges[i] / m_scanFar;
-			if (x < 0.0f) x = 0.0f;
-			else if (x > 1.0f) x = 1.0f;
+			float range = msg.ranges[i];
+			
+			// Handle invalid ranges (inf, nan, too close)
+			if (!std::isfinite(range) || range < m_scanNear || range > m_scanFar) {
+				scan_data[i] = 0.0f;  // No detection
+				continue;
+			}
+			
+			// Normalize to [0, 1] where 1 = close, 0 = far
+			float x = range / m_scanFar;
 			scan_data[i] = 1.0f - x;
 		}
 		m_binding->BindInput("scan", scan);
@@ -101,7 +130,7 @@ public:
 
 		auto grid_out = std::move(m_binding->GetOutputValues()[0]);
 		const float* grid_raw = grid_out.GetTensorData<float>();
-		auto grid_shape = std::move(grid_out.GetTensorTypeAndShapeInfo().GetShape());
+		auto grid_shape = grid_out.GetTensorTypeAndShapeInfo().GetShape();
 		if (grid_shape.size() != 4 || grid_shape[0] != 1 || grid_shape[3] != 3) {
 			RCLCPP_ERROR(m_log, "[LFE-PPN] Unexpected grid shape");
 			return {};
@@ -118,13 +147,20 @@ public:
 			num_sectors, num_anchors_per_sector, sector_ampl*360.0f/(float)M_TAU, anchor_depth);
 
 		std::multimap<float, unsigned> sorted;
+		float max_score = 0.0f;
+		unsigned num_above_half = 0;
 
 		for (unsigned i = 0; i < num_anchors; i ++) {
 			float i_score = grid_raw[i*3];
+			if (i_score > max_score) max_score = i_score;
+			if (i_score >= 0.5f) num_above_half++;
 			if (i_score >= m_scoreThresh) {
 				sorted.emplace(-i_score, i);
 			}
 		}
+
+		RCLCPP_DEBUG(m_log, "[LFE-PPN] Max score: %.6f, Above 0.5: %u, Above threshold (%.6f): %zu",
+			max_score, num_above_half, m_scoreThresh, sorted.size());
 
 		std::vector<Person> people;
 
@@ -233,13 +269,16 @@ public:
 	LaserModelHost(rclcpp::NodeOptions const& options) :
 		Node{"lasermodelhost", options}
 	{
+		// Declare use_sim_time parameter (should be set when playing rosbags)
+		// declare_parameter<bool>("use_sim_time", false);
+		
 		auto model_file = declare_parameter<std::string>("model_file");
 
 		auto laser_topic  = declare_parameter<std::string>("laser_topic",  "/scanfront");
 		auto output_topic = declare_parameter<std::string>("output_topic", "detected_people");
 		auto marker_topic = declare_parameter<std::string>("marker_topic", "detected_people_markers");
 
-		auto near   = declare_parameter<float>("scan_near",       0.02f);
+		auto near   = declare_parameter<float>("scan_near",       0.3f);
 		auto far    = declare_parameter<float>("scan_far",        10.0f);
 		auto thresh = declare_parameter<float>("score_threshold", 0.937660f);
 
